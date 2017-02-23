@@ -1,12 +1,17 @@
+from collections import OrderedDict
 import datetime
+import getpass
 import hashlib
+import json
 import requests
+import sys
 
 
-AUTH_URL = 'http://api.myshows.ru/profile/login?login={username}&password={password_md5}'
-SHOWS_URL = 'http://api.myshows.ru/profile/shows/'
-SHOW_URL = 'http://api.myshows.ru/shows/{show_id}'
-EPISODES_URL = 'http://api.myshows.ru/profile/shows/{show_id}/'
+API_ROOT = 'http://api.myshows.ru'
+AUTH_URL = '/profile/login?login={username}&password={password_md5}'
+SHOWS_URL = '/profile/shows/'
+SHOW_URL = '/shows/{show_id}'
+EPISODES_URL = '/profile/shows/{show_id}/'
 
 
 def authenticate(session, username, password):
@@ -17,18 +22,22 @@ def authenticate(session, username, password):
 
 def load(username, password):
     session = requests.session()
+    session._get = session.get
+    session.get = lambda url: session._get(API_ROOT + url)
 
     authenticate(session, username, password)
-    shows = session.get(SHOWS_URL).json()
-    all_episodes = []
-    shows_count = 0
-    for show in shows.values():
+    data = session.get(SHOWS_URL).json()
+    total = len(data)
+    shows = []
+    for n, show in enumerate(data.values(), 1):
         show_id = show['showId']
         show_data = session.get(SHOW_URL.format(show_id=show_id)).json()
         episodes = session.get(EPISODES_URL.format(show_id=show_id)).json()
         if not episodes:
             continue
 
+        show = OrderedDict([('id', show_id), ('title', show_data['title']),
+                            ('year', show_data['year']), ('episodes', [])])
         for watched_episode in episodes.values():
             episode_id = watched_episode['id']
             try:
@@ -38,10 +47,24 @@ def load(username, password):
 
             watched = datetime.datetime.strptime(watched_episode['watchDate'],
                                                  '%d.%m.%Y').date()
-            item = (show_id, show_data['title'], show_data['year'],
-                    episode_id, data['title'], data['seasonNumber'],
-                    data['episodeNumber'], watched.isoformat())
-            all_episodes.append(item)
-        shows_count += 1
-    all_episodes.sort(key=lambda i: i[-1])
+            item = OrderedDict([('id', episode_id), ('title', data['title']),
+                                ('season', data['seasonNumber']),
+                                ('number', data['episodeNumber']),
+                                ('watched', watched.isoformat())])
+            show['episodes'].append(item)
+        show['episodes'].sort(key=lambda e: e['watched'])
+        shows.append(show)
+        sys.stderr.write('Getting shows: %d/%d\r' % (n, total))
+    sys.stderr.write('\n')
+    shows.sort(key=lambda show: show['episodes'][0]['watched'])
+    return shows
 
+
+if __name__ == '__main__':
+    try:
+        username = sys.argv[1]
+    except IndexError:
+        raise Exception('Usage: %s <username>' % sys.argv[0])
+    password = getpass.getpass('Password for %s:' % username)
+    data = load(username, password)
+    json.dump(data, sys.stdout, indent=2)
